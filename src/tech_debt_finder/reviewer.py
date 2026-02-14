@@ -249,7 +249,7 @@ def _parse_issues(
 def review_file(
     file_path: Path,
     target_dir: Path,
-    model: str = "codellama",
+    model: str = "qwen2.5-coder:7b",
     ollama_url: str = "http://localhost:11434",
     max_retries: int = 3,
     client: httpx.Client | None = None,

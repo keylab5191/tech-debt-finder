@@ -13,7 +13,7 @@ AI-powered tech debt scanner that reviews your codebase using local LLMs and gen
 
 - **Python 3.10+**
 - **[Ollama](https://ollama.com)** installed and running
-- A code model pulled (e.g. `ollama pull codellama`)
+- A code model pulled (e.g. `ollama pull qwen2.5-coder:7b`)
 
 ## Installation
 
