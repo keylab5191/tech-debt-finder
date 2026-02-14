@@ -17,10 +17,10 @@ console = Console(stderr=True)
 
 # The system prompt instructs the LLM to return structured JSON issues
 SYSTEM_PROMPT = """You are a senior software engineer performing a tech debt review.
-Analyze the provided source code and identify ANY technical debt, code smells, or improvement opportunities.
+Analyze the provided source code and identify the MOST IMPORTANT technical debt, code smells, or improvement opportunities.
 
-Look for:
-- Code smells (dead code, magic numbers, overly long functions, god classes)
+Look for (prioritize higher-impact items):
+- Code smells (dead code, meaningful magic numbers, overly long functions, god classes)
 - Complexity issues (deeply nested logic, complex conditionals)
 - Poor naming (unclear variable/function/class names)
 - Structural problems (poor file organization, tight coupling, missing abstractions)
@@ -30,6 +30,9 @@ Look for:
 - Performance issues (N+1 queries, unnecessary loops, memory leaks)
 - Readability problems (missing docs, unclear intent, overly clever code)
 - Best practices violations (not following language idioms, anti-patterns)
+
+Do NOT report as magic numbers: format specifiers (e.g. .2f, .1f), padding widths in format strings, or numbers inside comments. Only report numbers that are configuration/business values (timeouts, limits, sizes) that would benefit from being named constants.
+Report each distinct issue ONCE (one finding per logical issue, not one per occurrence). Prefer quality over quantity; 5–15 strong issues per file is better than many duplicates.
 
 Respond ONLY with a JSON array of issues. Each issue must be an object with these exact keys:
 - "title": short descriptive title (string)
@@ -57,29 +60,155 @@ File: {file_path}
 Respond with a JSON array of issues found."""
 
 
-def _parse_issues(response_text: str, file_path: str) -> list[Issue]:
-    """Parse LLM response into structured Issue objects."""
-    # Try to extract JSON from the response
+def _extract_json_array(text: str) -> str | None:
+    """Extract the first complete JSON array using bracket matching (ignores ] inside strings)."""
+    start = text.find("[")
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    quote_char = None
+    i = start
+    while i < len(text):
+        c = text[i]
+        if escape:
+            escape = False
+            i += 1
+            continue
+        if in_string:
+            if c == "\\":
+                escape = True
+            elif c == quote_char:
+                in_string = False
+            i += 1
+            continue
+        if c in ('"', "'"):
+            in_string = True
+            quote_char = c
+            i += 1
+            continue
+        if c == "[":
+            depth += 1
+        elif c == "]":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+        i += 1
+    return None
+
+
+def _repair_json(s: str) -> str:
+    """Fix trailing comma only at the very end of the string (safe for strings containing ', ]')."""
+    s = re.sub(r",\s*\]\s*$", "]", s)
+    s = re.sub(r",\s*\}\s*$", "}", s)
+    return s
+
+
+def _extract_json_objects(text: str) -> list[dict[str, Any]]:
+    """Extract complete {...} JSON objects from text (for truncated response fallback)."""
+    objects: list[dict[str, Any]] = []
+    i = 0
+    while i < len(text):
+        start = text.find("{", i)
+        if start == -1:
+            break
+        depth = 0
+        in_string = False
+        escape = False
+        quote_char = None
+        j = start
+        while j < len(text):
+            c = text[j]
+            if escape:
+                escape = False
+                j += 1
+                continue
+            if in_string:
+                if c == "\\":
+                    escape = True
+                elif c == quote_char:
+                    in_string = False
+                j += 1
+                continue
+            if c in ('"', "'"):
+                in_string = True
+                quote_char = c
+                j += 1
+                continue
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    chunk = text[start : j + 1]
+                    try:
+                        obj = json.loads(chunk)
+                        if isinstance(obj, dict) and "title" in obj:
+                            objects.append(obj)
+                    except json.JSONDecodeError:
+                        pass
+                    j += 1
+                    break
+            j += 1
+        i = j if j > start else start + 1
+    return objects
+
+
+def _write_debug_response(response_text: str, file_path: str, debug_dir: Path) -> None:
+    """Write raw LLM response to a debug file when parsing fails."""
+    safe_name = re.sub(r'[<>:"/\\|?*]', "_", file_path).strip() or "unknown"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    out = debug_dir / f"{safe_name}.txt"
+    out.write_text(response_text, encoding="utf-8")
+    console.print(f"  [dim]Debug response written to {out}[/]")
+
+
+def _parse_issues(
+    response_text: str, file_path: str, debug_dir: Path | None = None
+) -> tuple[list[Issue], bool]:
+    """Parse LLM response into structured Issue objects. Returns (issues, parse_failed)."""
     text = response_text.strip()
 
-    # Remove markdown code fences if present
-    text = re.sub(r"^```(?:json)?\s*", "", text)
-    text = re.sub(r"\s*```$", "", text)
+    # Remove markdown code fences (case-insensitive: ```json, ```JSON, etc.)
+    text = re.sub(r"^```(?i:json)?\s*", "", text)
+    text = re.sub(r"\s*```\s*$", "", text)
+    text = text.strip()
 
-    # Try to find a JSON array in the text
-    match = re.search(r"\[.*\]", text, re.DOTALL)
-    if match:
-        text = match.group(0)
+    # Extract the first complete JSON array (bracket-matched)
+    extracted = _extract_json_array(text)
+    if extracted is not None:
+        text = extracted
 
-    try:
-        raw_issues: list[dict[str, Any]] = json.loads(text)
-    except json.JSONDecodeError:
-        # If we can't parse JSON, return empty — don't crash
-        console.print(f"  [dim yellow]⚠ Could not parse LLM response for {file_path}[/]")
-        return []
+    # Try parsing; if it fails, try with trailing-comma repair (end of string only)
+    raw_issues: list[dict[str, Any]] | None = None
+    parsed_as_json = False
+    for candidate in (text, _repair_json(text)):
+        try:
+            raw_issues = json.loads(candidate)
+            if isinstance(raw_issues, list):
+                parsed_as_json = True
+            break
+        except json.JSONDecodeError:
+            continue
+
+    # Fallback: extract complete {...} objects (handles truncated or malformed response)
+    if raw_issues is None:
+        raw_issues = _extract_json_objects(text)
+    if raw_issues is None:
+        raw_issues = []
 
     if not isinstance(raw_issues, list):
-        return []
+        raw_issues = []
+
+    # Empty list from successful JSON parse means "no issues" (valid); only warn on actual parse failure
+    if not raw_issues and not parsed_as_json:
+        snippet = response_text.strip()[:500]
+        console.print(f"  [dim yellow]⚠ Could not parse LLM response for {file_path}[/]")
+        console.print(f"  [dim]Response snippet: {snippet!r}[/]")
+        if debug_dir is not None:
+            _write_debug_response(response_text, file_path, debug_dir)
+        return [], True
 
     issues: list[Issue] = []
     for raw in raw_issues:
@@ -114,7 +243,7 @@ def _parse_issues(response_text: str, file_path: str) -> list[Issue]:
             # Skip malformed issues
             continue
 
-    return issues
+    return issues, False
 
 
 def review_file(
@@ -123,6 +252,7 @@ def review_file(
     model: str = "codellama",
     ollama_url: str = "http://localhost:11434",
     max_retries: int = 3,
+    client: httpx.Client | None = None,
 ) -> ScanResult:
     """
     Send a single file to the Ollama LLM for tech debt review.
@@ -132,7 +262,9 @@ def review_file(
     rel_path = str(file_path.relative_to(target_dir))
 
     try:
+        t_read = time.perf_counter()
         content = file_path.read_text(encoding="utf-8", errors="replace")
+        console.print(f"    [dim]{time.perf_counter() - t_read:.2f}s read file[/]")
     except Exception as e:
         return ScanResult(
             file_path=rel_path,
@@ -140,38 +272,94 @@ def review_file(
             error=f"Could not read file: {e}",
         )
 
-    # Skip very small files (likely empty or just imports)
-    if len(content.strip()) < 50:
+    # Skip very small files (boilerplate, small __init__.py, etc.)
+    if len(content.strip()) < 150:
         return ScanResult(file_path=rel_path, model_used=model)
 
+    t_prompt = time.perf_counter()
     prompt = _build_prompt(rel_path, content)
+    console.print(f"    [dim]{time.perf_counter() - t_prompt:.2f}s build prompt ({len(prompt)} chars)[/]")
+
+    console.print(f"  [dim]Analyzing {rel_path}...[/]")
 
     for attempt in range(max_retries):
         try:
-            response = httpx.post(
-                f"{ollama_url}/api/generate",
+            console.print(f"    [dim]Calling Ollama (attempt {attempt + 1})...[/]")
+            t_ollama = time.perf_counter()
+            # keep_alive: keep model loaded (in GPU memory) for run duration so GPU usage is visible
+            post_kw = dict(
                 json={
                     "model": model,
                     "prompt": prompt,
                     "system": SYSTEM_PROMPT,
                     "stream": False,
+                    "keep_alive": "30m",
                     "options": {
                         "temperature": 0.1,
-                        "num_predict": 4096,
+                        "num_predict": 1024,   # cap to reduce duplicate/low-value issues
+                        "num_ctx": 8192,       # context window (prompt + response)
                     },
                 },
                 timeout=300.0,  # Local LLMs can be slow
             )
+            if client is not None:
+                response = client.post(f"{ollama_url.rstrip('/')}/api/generate", **post_kw)
+            else:
+                response = httpx.post(f"{ollama_url.rstrip('/')}/api/generate", **post_kw)
             response.raise_for_status()
+            console.print(f"    [dim]{time.perf_counter() - t_ollama:.2f}s Ollama returned[/]")
+
+            t_parse = time.perf_counter()
             result = response.json()
             response_text = result.get("response", "")
 
-            issues = _parse_issues(response_text, rel_path)
+            # Extract performance metrics
+            # Ollama returns durations in nanoseconds
+            eval_count = result.get("eval_count", 0)
+            eval_duration_ns = result.get("eval_duration", 0)
+            load_duration_ns = result.get("load_duration", 0)
+            prompt_eval_count = result.get("prompt_eval_count", 0)
+            prompt_eval_duration_ns = result.get("prompt_eval_duration", 0)
+
+            # Calculate tokens per second (avoid division by zero)
+            eval_duration_s = eval_duration_ns / 1_000_000_000
+            load_duration_s = load_duration_ns / 1_000_000_000
+            prompt_eval_duration_s = prompt_eval_duration_ns / 1_000_000_000
+            tokens_per_second = 0.0
+            if eval_duration_s > 0:
+                tokens_per_second = eval_count / eval_duration_s
+
+            # Log metrics (load + prompt eval often dominate first-file time)
+            load_str = ""
+            if load_duration_s > 0.1:
+                load_str = f"Loaded in {load_duration_s:.1f}s. "
+            prompt_str = ""
+            if prompt_eval_duration_s > 0.5:
+                prompt_str = f"Prompt eval {prompt_eval_duration_s:.1f}s. "
+            console.print(
+                f"  [dim]LLM: {load_str}{prompt_str}{eval_count} tokens in {eval_duration_s:.2f}s "
+                f"({tokens_per_second:.2f} t/s)[/]"
+            )
+
+            debug_dir = Path.cwd() / "tech_debt_debug"
+            issues, parse_failed = _parse_issues(response_text, rel_path, debug_dir=debug_dir)
+            console.print(f"    [dim]{time.perf_counter() - t_parse:.2f}s parse response[/]")
+
+            metrics = {
+                "eval_count": eval_count,
+                "eval_duration_ns": eval_duration_ns,
+                "load_duration_ns": load_duration_ns,
+                "prompt_eval_count": prompt_eval_count,
+                "prompt_eval_duration_ns": prompt_eval_duration_ns,
+                "tokens_per_second": tokens_per_second,
+            }
 
             return ScanResult(
                 file_path=rel_path,
                 issues=issues,
                 model_used=model,
+                performance_metrics=metrics,
+                parse_failed=parse_failed,
             )
 
         except httpx.ConnectError:
@@ -185,11 +373,21 @@ def review_file(
                 error=error_msg,
             )
 
-        except (httpx.HTTPStatusError, httpx.TimeoutException) as e:
+        except httpx.TimeoutException:
+            if attempt < max_retries - 1:
+                console.print(f"  [dim yellow]⚠ Timeout - Retrying {attempt + 1}...[/]")
+                continue
+            return ScanResult(
+                file_path=rel_path,
+                model_used=model,
+                error=f"Timeout after {max_retries} attempts",
+            )
+
+        except httpx.HTTPStatusError as e:
             if attempt < max_retries - 1:
                 wait = 2 ** attempt
                 console.print(
-                    f"  [dim yellow]⚠ Retry {attempt + 1}/{max_retries} for {rel_path} "
+                    f"  [dim yellow]⚠ Error {e.response.status_code} - Retry {attempt + 1}/{max_retries} "
                     f"(waiting {wait}s)[/]"
                 )
                 time.sleep(wait)
@@ -207,5 +405,4 @@ def review_file(
                 error=f"Unexpected error: {e}",
             )
 
-    # Should not reach here, but just in case
     return ScanResult(file_path=rel_path, model_used=model, error="Unknown error")

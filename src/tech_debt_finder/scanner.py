@@ -34,6 +34,10 @@ DEFAULT_EXTENSIONS = {
 }
 
 
+# Binary detection chunk size
+BINARY_DETECTION_CHUNK_SIZE = 8192
+
+
 def _load_gitignore(directory: Path) -> pathspec.PathSpec | None:
     """Load .gitignore patterns from the given directory."""
     gitignore_path = directory / ".gitignore"
@@ -43,17 +47,85 @@ def _load_gitignore(directory: Path) -> pathspec.PathSpec | None:
     return None
 
 
-def _is_binary(file_path: Path, sample_size: int = 8192) -> bool:
-    """Quick heuristic to check if a file is binary."""
+def _is_binary(file_path: Path, chunk_size: int = BINARY_DETECTION_CHUNK_SIZE) -> bool:
+    """
+    Check if a file is binary by reading a chunk and looking for null bytes.
+
+    Args:
+        file_path: Path to the file to check.
+        chunk_size: Number of bytes to read for detection (default: 8192).
+
+    Returns:
+        True if the file appears to be binary, False otherwise.
+    """
     try:
         with open(file_path, "rb") as f:
-            chunk = f.read(sample_size)
+            chunk = f.read(chunk_size)
         # Check for null bytes — strong indicator of binary content
         if b"\x00" in chunk:
             return True
         return False
     except (OSError, PermissionError):
         return True
+
+
+def _yield_code_files(
+    directory: Path,
+    target_root: Path,
+    gitignore: pathspec.PathSpec | None,
+    extensions: set[str],
+    max_file_size_bytes: int,
+) -> Generator[Path, None, None]:
+    """
+    Recursively yield code files from directory, respecting filters.
+
+    Args:
+        directory: Current directory to walk.
+        target_root: Root directory of the scan (for relative path calcs).
+        gitignore: Compiled .gitignore patterns or None.
+        extensions: Set of allowed file extensions (lowercase, with dot).
+        max_file_size_bytes: Maximum allowed file size in bytes.
+    """
+    try:
+        entries = sorted(directory.iterdir())
+    except PermissionError:
+        return
+
+    for entry in entries:
+        # Get path relative to target for .gitignore matching
+        try:
+            rel_path = entry.relative_to(target_root)
+        except ValueError:
+            continue
+
+        # Check .gitignore
+        if gitignore and gitignore.match_file(str(rel_path)):
+            continue
+
+        if entry.is_dir():
+            if entry.name in SKIP_DIRS:
+                continue
+            yield from _yield_code_files(
+                entry, target_root, gitignore, extensions, max_file_size_bytes
+            )
+
+        elif entry.is_file():
+            # Extension filter
+            if entry.suffix.lower() not in extensions:
+                continue
+
+            # Size filter
+            try:
+                if entry.stat().st_size > max_file_size_bytes:
+                    continue
+            except OSError:
+                continue
+
+            # Binary filter
+            if _is_binary(entry):
+                continue
+
+            yield entry
 
 
 def scan_files(
@@ -80,44 +152,10 @@ def scan_files(
     # Load root .gitignore
     gitignore = _load_gitignore(target_dir)
 
-    def _walk(directory: Path) -> Generator[Path, None, None]:
-        try:
-            entries = sorted(directory.iterdir())
-        except PermissionError:
-            return
-
-        for entry in entries:
-            # Get path relative to target for .gitignore matching
-            try:
-                rel_path = entry.relative_to(target_dir)
-            except ValueError:
-                continue
-
-            # Check .gitignore
-            if gitignore and gitignore.match_file(str(rel_path)):
-                continue
-
-            if entry.is_dir():
-                if entry.name in SKIP_DIRS:
-                    continue
-                yield from _walk(entry)
-
-            elif entry.is_file():
-                # Extension filter
-                if entry.suffix.lower() not in extensions:
-                    continue
-
-                # Size filter
-                try:
-                    if entry.stat().st_size > max_bytes:
-                        continue
-                except OSError:
-                    continue
-
-                # Binary filter
-                if _is_binary(entry):
-                    continue
-
-                yield entry
-
-    yield from _walk(target_dir)
+    yield from _yield_code_files(
+        directory=target_dir,
+        target_root=target_dir,
+        gitignore=gitignore,
+        extensions=extensions,
+        max_file_size_bytes=max_bytes,
+    )

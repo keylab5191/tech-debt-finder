@@ -131,6 +131,18 @@ def print_summary(report: ScanReport) -> None:
         console.print(file_table)
         console.print()
 
+    # Parse failures (LLM responded but we couldn't parse; debug file written)
+    parse_failures = [r for r in report.results if getattr(r, "parse_failed", False)]
+    if parse_failures:
+        console.print(
+            f"[dim yellow]⚠ {len(parse_failures)} file(s) had unparseable LLM response (see tech_debt_debug/)[/]"
+        )
+        for r in parse_failures[:5]:
+            console.print(f"  [dim]{r.file_path}[/]")
+        if len(parse_failures) > 5:
+            console.print(f"  [dim]... and {len(parse_failures) - 5} more[/]")
+        console.print()
+
     # Errors
     errors = [r for r in report.results if r.error]
     if errors:

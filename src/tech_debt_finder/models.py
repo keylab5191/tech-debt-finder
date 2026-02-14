@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
@@ -51,7 +51,10 @@ class ScanResult(BaseModel):
     issues: list[Issue] = Field(default_factory=list)
     scanned_at: datetime = Field(default_factory=datetime.now)
     model_used: str = ""
+    performance_metrics: Optional[dict[str, Any]] = None
     error: Optional[str] = None
+    # True when the LLM returned text but we could not parse it (debug file written)
+    parse_failed: bool = False
 
 
 class ScanConfig(BaseModel):
