@@ -21,7 +21,7 @@ from rich.progress import (
 import httpx
 
 from . import __version__
-from .models import ScanConfig, ScanReport
+from .models import Category, ScanConfig, ScanReport
 from .report import print_summary, write_report
 from .reviewer import review_file
 from .scanner import DEFAULT_EXTENSIONS, scan_files
@@ -67,6 +67,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Max file size in KB to scan (default: 100)",
     )
     parser.add_argument(
+        "--categories", "-c",
+        default=None,
+        help="Comma-separated categories to scan (e.g. security,complexity,naming). "
+             "Available: code_smell, complexity, naming, structure, duplication, "
+             "error_handling, security, performance, readability, best_practices. "
+             "Default: all",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Enable verbose output",
@@ -79,11 +87,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _elapsed(t0: float) -> str:
-    return f"[{time.perf_counter() - t0:.2f}s]"
+def calculate_elapsed_time(start_time: float) -> str:
+    return f"[{time.perf_counter() - start_time:.2f}s]"
 
 
-def test_ollama(ollama_url: str, model: str) -> bool:
+def verify_ollama_connection(ollama_url: str, model: str) -> bool:
     """
     Run a quick Ollama connectivity and model test with debug output.
     Returns True if OK, False if test failed (caller should exit 1).
@@ -119,7 +127,7 @@ def test_ollama(ollama_url: str, model: str) -> bool:
         # 2) Minimal generate to confirm model loads and responds
         try:
             console.print("  [dim]POST /api/generate (minimal prompt) ...[/]")
-            t0 = time.perf_counter()
+            test_start_time = time.perf_counter()
             r = client.post(
                 f"{base}/api/generate",
                 json={
@@ -130,7 +138,7 @@ def test_ollama(ollama_url: str, model: str) -> bool:
                 },
                 timeout=60.0,
             )
-            elapsed = time.perf_counter() - t0
+            elapsed = time.perf_counter() - test_start_time
             r.raise_for_status()
             out = r.json()
             load_ns = out.get("load_duration", 0)
@@ -163,9 +171,9 @@ def test_ollama(ollama_url: str, model: str) -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     """Main entry point."""
-    t0 = time.perf_counter()
+    scan_start_time = time.perf_counter()
     args = parse_args(argv)
-    console.print(f"  {_elapsed(t0)} parse args done")
+    console.print(f"  {calculate_elapsed_time(scan_start_time)} parse args done")
 
     target_dir = Path(args.target).resolve()
     if not target_dir.is_dir():
@@ -182,6 +190,18 @@ def main(argv: list[str] | None = None) -> int:
                 ext = f".{ext}"
             extensions.add(ext.lower())
 
+    # Parse categories
+    categories: list[Category | None] = [None]  # None means "all categories" (legacy behavior)
+    if args.categories:
+        category_names = [c.strip().lower() for c in args.categories.split(",")]
+        categories = []
+        for name in category_names:
+            try:
+                categories.append(Category(name))
+            except ValueError:
+                console.print(f"[bold red]Error:[/] Invalid category '{name}'. Valid categories: {[c.value for c in Category]}")
+                return 1
+
     output_path = Path(args.output)
 
     # Print banner
@@ -190,18 +210,22 @@ def main(argv: list[str] | None = None) -> int:
     console.print(f"   Target:  [cyan]{target_dir}[/]")
     console.print(f"   Model:   [cyan]{args.model}[/]")
     console.print(f"   Output:  [cyan]{output_path}[/]")
+    if categories and categories[0] is None:
+        console.print(f"   Categories: [cyan]all[/]")
+    else:
+        console.print(f"   Categories: [cyan]{', '.join(c.value for c in categories)}[/]")
     console.print()
 
     # Pre-flight: test Ollama connectivity and model
-    if not test_ollama(args.ollama_url, args.model):
+    if not verify_ollama_connection(args.ollama_url, args.model):
         console.print("[bold red]Ollama check failed. Fix the issue above and try again.[/]")
         return 1
 
     # Collect files
-    console.print(f"  {_elapsed(t0)} Scanning for code files...")
-    t_scan = time.perf_counter()
+    console.print(f"  {calculate_elapsed_time(scan_start_time)} Scanning for code files...")
+    scan_start_timestamp = time.perf_counter()
     files = list(scan_files(target_dir, extensions, args.max_file_size))
-    console.print(f"  {_elapsed(t0)} Scan done in {time.perf_counter() - t_scan:.2f}s")
+    console.print(f"  {calculate_elapsed_time(scan_start_time)} Scan done in {time.perf_counter() - scan_start_timestamp:.2f}s")
 
     if not files:
         console.print("[yellow]No code files found to scan.[/]")
@@ -211,7 +235,7 @@ def main(argv: list[str] | None = None) -> int:
     console.print()
 
     # Create report
-    console.print(f"  {_elapsed(t0)} Building report config...")
+    console.print(f"  {calculate_elapsed_time(scan_start_time)} Building report config...")
     config = ScanConfig(
         model=args.model,
         ollama_url=args.ollama_url,
@@ -224,9 +248,15 @@ def main(argv: list[str] | None = None) -> int:
         config=config,
         scan_started_at=datetime.now(),
     )
-    console.print(f"  {_elapsed(t0)} Config done")
+    console.print(f"  {calculate_elapsed_time(scan_start_time)} Config done")
 
     # Process files with progress bar; reuse one HTTP client so Ollama keeps the model loaded
+    # If categories is [None], use None (legacy "all" behavior)
+    scan_categories: list[Category | None] = categories if categories and categories[0] is not None else [None]
+    
+    # Calculate total work: files * categories
+    total_work = len(files) * len(scan_categories)
+    
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -235,46 +265,51 @@ def main(argv: list[str] | None = None) -> int:
         TimeElapsedColumn(),
         console=console,
     ) as progress:
-        task = progress.add_task("Reviewing files", total=len(files))
+        task = progress.add_task("Reviewing files", total=total_work)
 
         with httpx.Client(timeout=300.0) as http_client:
-            for file_path in files:
-                rel_path = file_path.relative_to(target_dir)
-                progress.update(task, description=f"[cyan]{rel_path}[/]")
+            for category in scan_categories:
+                category_name = category.value if category else "all"
+                console.print(f"\n[bold]Scanning for: {category_name}[/]")
+                
+                for file_path in files:
+                    rel_path = file_path.relative_to(target_dir)
+                    progress.update(task, description=f"[cyan]{rel_path}[/] ({category_name})")
 
-                console.print(f"  {_elapsed(t0)} Reviewing {rel_path}...")
-                t_file = time.perf_counter()
-                result = review_file(
-                    file_path=file_path,
-                    target_dir=target_dir,
-                    model=args.model,
-                    ollama_url=args.ollama_url,
-                    client=http_client,
-                )
-                console.print(f"  {_elapsed(t0)} {rel_path} done in {time.perf_counter() - t_file:.2f}s")
-                report.results.append(result)
-
-                if result.error:
-                    if "Cannot connect to Ollama" in result.error:
-                        console.print(f"\n[bold red]Error:[/] {result.error}")
-                        return 1
-                    if args.verbose:
-                        console.print(f"  [dim red]✗ {rel_path}: {result.error}[/]")
-                elif result.issues and args.verbose:
-                    console.print(
-                        f"  [dim]Found {len(result.issues)} issue(s) in {rel_path}[/]"
+                    console.print(f"  {calculate_elapsed_time(scan_start_time)} Reviewing {rel_path} for {category_name}...")
+                    file_review_start = time.perf_counter()
+                    result = review_file(
+                        file_path=file_path,
+                        target_dir=target_dir,
+                        model=args.model,
+                        ollama_url=args.ollama_url,
+                        client=http_client,
+                        category=category,
                     )
+                    console.print(f"  {calculate_elapsed_time(scan_start_time)} {rel_path} done in {time.perf_counter() - file_review_start:.2f}s")
+                    report.results.append(result)
 
-                progress.advance(task)
+                    if result.error:
+                        if "Cannot connect to Ollama" in result.error:
+                            console.print(f"\n[bold red]Error:[/] {result.error}")
+                            return 1
+                        if args.verbose:
+                            console.print(f"  [dim red]✗ {rel_path}: {result.error}[/]")
+                    elif result.issues and args.verbose:
+                        console.print(
+                            f"  [dim]Found {len(result.issues)} issue(s) in {rel_path}[/]"
+                        )
+
+                    progress.advance(task)
 
     # Finalize and write report
-    console.print(f"  {_elapsed(t0)} Finalizing report...")
-    t_final = time.perf_counter()
+    console.print(f"  {calculate_elapsed_time(scan_start_time)} Finalizing report...")
+    report_finalization_start = time.perf_counter()
     report.finalize()
     write_report(report, output_path)
-    console.print(f"  {_elapsed(t0)} Write report done in {time.perf_counter() - t_final:.2f}s")
+    console.print(f"  {calculate_elapsed_time(scan_start_time)} Write report done in {time.perf_counter() - report_finalization_start:.2f}s")
     print_summary(report)
-    console.print(f"  {_elapsed(t0)} Total run: {time.perf_counter() - t0:.2f}s")
+    console.print(f"  {calculate_elapsed_time(scan_start_time)} Total run: {time.perf_counter() - scan_start_time:.2f}s")
 
     return 0
 

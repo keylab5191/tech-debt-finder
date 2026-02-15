@@ -35,9 +35,9 @@ def write_report(report: ScanReport, output_path: Path) -> None:
     """Write the scan report to a JSON file."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    data = report.model_dump(mode="json")
+    report_data = report.model_dump(mode="json")
     with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, default=str)
+        json.dump(report_data, f, indent=2, default=str)
 
     console.print(f"\n📄 Report written to [bold cyan]{output_path}[/]")
 
@@ -75,7 +75,7 @@ def print_summary(report: ScanReport) -> None:
         return
 
     # Severity breakdown
-    all_issues = [issue for r in report.results for issue in r.issues]
+    all_issues = [issue for result in report.results for issue in result.issues]
     severity_counts = Counter(issue.severity for issue in all_issues)
 
     sev_table = Table(title="Severity Breakdown", border_style="dim")
@@ -114,9 +114,9 @@ def print_summary(report: ScanReport) -> None:
 
     # Top problematic files
     file_issue_counts = [
-        (r.file_path, len(r.issues))
-        for r in report.results
-        if r.issues
+        (result.file_path, len(result.issues))
+        for result in report.results
+        if result.issues
     ]
     file_issue_counts.sort(key=lambda x: x[1], reverse=True)
 
@@ -132,22 +132,22 @@ def print_summary(report: ScanReport) -> None:
         console.print()
 
     # Parse failures (LLM responded but we couldn't parse; debug file written)
-    parse_failures = [r for r in report.results if getattr(r, "parse_failed", False)]
-    if parse_failures:
+    unparseable_results = [result for result in report.results if getattr(result, "parse_failed", False)]
+    if unparseable_results:
         console.print(
-            f"[dim yellow]⚠ {len(parse_failures)} file(s) had unparseable LLM response (see tech_debt_debug/)[/]"
+            f"[dim yellow]⚠ {len(unparseable_results)} file(s) had unparseable LLM response (see tech_debt_debug/)[/]"
         )
-        for r in parse_failures[:5]:
-            console.print(f"  [dim]{r.file_path}[/]")
-        if len(parse_failures) > 5:
-            console.print(f"  [dim]... and {len(parse_failures) - 5} more[/]")
+        for result in unparseable_results[:5]:
+            console.print(f"  [dim]{result.file_path}[/]")
+        if len(unparseable_results) > 5:
+            console.print(f"  [dim]... and {len(unparseable_results) - 5} more[/]")
         console.print()
 
     # Errors
-    errors = [r for r in report.results if r.error]
-    if errors:
-        console.print(f"[dim red]⚠ {len(errors)} file(s) had errors during scanning[/]")
-        for r in errors[:5]:
-            console.print(f"  [dim]{r.file_path}: {r.error}[/]")
-        if len(errors) > 5:
-            console.print(f"  [dim]... and {len(errors) - 5} more[/]")
+    error_results = [result for result in report.results if result.error]
+    if error_results:
+        console.print(f"[dim red]⚠ {len(error_results)} file(s) had errors during scanning[/]")
+        for result in error_results[:5]:
+            console.print(f"  [dim]{result.file_path}: {result.error}[/]")
+        if len(error_results) > 5:
+            console.print(f"  [dim]... and {len(error_results) - 5} more[/]")

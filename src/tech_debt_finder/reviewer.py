@@ -12,8 +12,17 @@ import httpx
 from rich.console import Console
 
 from .models import Category, Issue, ScanResult, Severity
+from .prompts import get_prompt
 
 console = Console(stderr=True)
+
+
+def _get_system_prompt(category: Category | None = None) -> str:
+    """Get the system prompt for a specific category, or the default if None."""
+    if category is None:
+        return SYSTEM_PROMPT
+    return get_prompt(category)
+
 
 # The system prompt instructs the LLM to return structured JSON issues
 SYSTEM_PROMPT = """You are a senior software engineer performing a tech debt review.
@@ -47,9 +56,10 @@ If the code is clean and has no issues, respond with an empty array: []
 IMPORTANT: Respond with ONLY the JSON array, no other text, no markdown fences, nothing else."""
 
 
-def _build_prompt(file_path: str, content: str) -> str:
+def _build_prompt(file_path: str, content: str, category: Category | None = None) -> str:
     """Build the user prompt with file context."""
-    return f"""Review the following file for tech debt issues.
+    category_context = f" focusing on {category.value}" if category else ""
+    return f"""Review the following file for tech debt issues{category_context}.
 
 File: {file_path}
 
@@ -253,6 +263,7 @@ def review_file(
     ollama_url: str = "http://localhost:11434",
     max_retries: int = 3,
     client: httpx.Client | None = None,
+    category: Category | None = None,
 ) -> ScanResult:
     """
     Send a single file to the Ollama LLM for tech debt review.
@@ -262,9 +273,9 @@ def review_file(
     rel_path = str(file_path.relative_to(target_dir))
 
     try:
-        t_read = time.perf_counter()
+        file_read_start = time.perf_counter()
         content = file_path.read_text(encoding="utf-8", errors="replace")
-        console.print(f"    [dim]{time.perf_counter() - t_read:.2f}s read file[/]")
+        console.print(f"    [dim]{time.perf_counter() - file_read_start:.2f}s read file[/]")
     except Exception as e:
         return ScanResult(
             file_path=rel_path,
@@ -276,22 +287,24 @@ def review_file(
     if len(content.strip()) < 150:
         return ScanResult(file_path=rel_path, model_used=model)
 
-    t_prompt = time.perf_counter()
-    prompt = _build_prompt(rel_path, content)
-    console.print(f"    [dim]{time.perf_counter() - t_prompt:.2f}s build prompt ({len(prompt)} chars)[/]")
+    prompt_build_start = time.perf_counter()
+    prompt = _build_prompt(rel_path, content, category)
+    console.print(f"    [dim]{time.perf_counter() - prompt_build_start:.2f}s build prompt ({len(prompt)} chars)[/]")
 
-    console.print(f"  [dim]Analyzing {rel_path}...[/]")
+    console.print(f"  [dim]Analyzing {rel_path} for {category.value if category else 'all categories'}...[/]")
+
+    system_prompt = _get_system_prompt(category)
 
     for attempt in range(max_retries):
         try:
             console.print(f"    [dim]Calling Ollama (attempt {attempt + 1})...[/]")
-            t_ollama = time.perf_counter()
+            ollama_call_start = time.perf_counter()
             # keep_alive: keep model loaded (in GPU memory) for run duration so GPU usage is visible
             post_kw = dict(
                 json={
                     "model": model,
                     "prompt": prompt,
-                    "system": SYSTEM_PROMPT,
+                    "system": system_prompt,
                     "stream": False,
                     "keep_alive": "30m",
                     "options": {
@@ -307,9 +320,9 @@ def review_file(
             else:
                 response = httpx.post(f"{ollama_url.rstrip('/')}/api/generate", **post_kw)
             response.raise_for_status()
-            console.print(f"    [dim]{time.perf_counter() - t_ollama:.2f}s Ollama returned[/]")
+            console.print(f"    [dim]{time.perf_counter() - ollama_call_start:.2f}s Ollama returned[/]")
 
-            t_parse = time.perf_counter()
+            response_parse_start = time.perf_counter()
             result = response.json()
             response_text = result.get("response", "")
 
@@ -343,7 +356,7 @@ def review_file(
 
             debug_dir = Path.cwd() / "tech_debt_debug"
             issues, parse_failed = _parse_issues(response_text, rel_path, debug_dir=debug_dir)
-            console.print(f"    [dim]{time.perf_counter() - t_parse:.2f}s parse response[/]")
+            console.print(f"    [dim]{time.perf_counter() - response_parse_start:.2f}s parse response[/]")
 
             metrics = {
                 "eval_count": eval_count,
