@@ -289,7 +289,7 @@
                                 <h3 class="text-sm font-medium text-gray-900 mb-2 line-clamp-2" x-text="issue.title"></h3>
                                 <div class="flex items-center gap-2 text-xs text-gray-500">
                                     <span class="px-2 py-0.5 bg-gray-100 rounded" x-text="issue.category"></span>
-                                    <span x-text="issue.file.split('/').pop()"></span>
+                                    <span x-text="issue.file_path.split(/[/\\]/).pop()"></span>
                                 </div>
                             </div>
                         </template>
@@ -331,7 +331,7 @@
                                 <h3 class="text-sm font-medium text-gray-900 mb-2 line-clamp-2" x-text="issue.title"></h3>
                                 <div class="flex items-center gap-2 text-xs text-gray-500">
                                     <span class="px-2 py-0.5 bg-gray-100 rounded" x-text="issue.category"></span>
-                                    <span x-text="issue.file.split('/').pop()"></span>
+                                    <span x-text="issue.file_path.split(/[/\\]/).pop()"></span>
                                 </div>
                             </div>
                         </template>
@@ -373,7 +373,7 @@
                                 <h3 class="text-sm font-medium text-gray-900 mb-2 line-clamp-2 line-through" x-text="issue.title"></h3>
                                 <div class="flex items-center gap-2 text-xs text-gray-500">
                                     <span class="px-2 py-0.5 bg-gray-100 rounded" x-text="issue.category"></span>
-                                    <span x-text="issue.file.split('/').pop()"></span>
+                                    <span x-text="issue.file_path.split(/[/\\]/).pop()"></span>
                                 </div>
                             </div>
                         </template>
@@ -421,7 +421,7 @@
                                           }"
                                           x-text="issue.status"></span>
                                 </td>
-                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500" x-text="issue.file"></td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500" x-text="issue.file_path"></td>
                                 <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500" x-text="new Date(issue.created_at).toLocaleDateString()"></td>
                             </tr>
                         </template>
@@ -610,10 +610,7 @@
                     <div class="mb-6">
                         <label class="block text-sm font-medium text-gray-700 mb-2">Location</label>
                         <div class="bg-gray-900 text-gray-100 p-4 rounded-lg text-sm font-mono overflow-x-auto">
-                            <div x-text="selectedIssue.file + ':' + selectedIssue.line"></div>
-                            <div x-show="selectedIssue.code_snippet" class="mt-2 text-gray-400">
-                                <pre><code x-text="selectedIssue.code_snippet"></code></pre>
-                            </div>
+                            <div x-text="(selectedIssue.file_path || 'Unknown') + ':' + (selectedIssue.line_range || 'N/A')"></div>
                         </div>
                     </div>
 

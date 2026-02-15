@@ -91,7 +91,7 @@ document.addEventListener('alpine:init', () => {
                 }
                 
                 const data = await response.json();
-                this.issues = data.issues || [];
+                this.issues = data.items || [];
                 
                 console.log(`Loaded ${this.issues.length} issues`);
             } catch (error) {
