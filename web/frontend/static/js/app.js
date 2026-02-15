@@ -5,9 +5,15 @@ document.addEventListener('alpine:init', () => {
         issues: [],
         activeScans: [],
         scanning: false,
-        viewMode: 'kanban',
+        viewMode: 'list',
+        groupByFile: true,
         selectedIssue: null,
         showScanModal: false,
+        
+        // Scans
+        scans: [],
+        selectedScanId: null,
+        showAllScans: false,
         
         // Filters
         filters: {
@@ -15,6 +21,13 @@ document.addEventListener('alpine:init', () => {
             severity: '',
             category: '',
             status: ''
+        },
+        
+        // Pagination
+        pagination: {
+            currentPage: 1,
+            pageSize: 50,
+            total: 0
         },
         
         // Scan Form
@@ -52,6 +65,7 @@ document.addEventListener('alpine:init', () => {
             console.log('Tech Debt Dashboard initializing...');
             
             // Load initial data
+            this.fetchScans();
             this.fetchIssues();
             this.fetchActiveScans();
             
@@ -68,32 +82,63 @@ document.addEventListener('alpine:init', () => {
          * Fetch issues from the API with current filters
          */
         async fetchIssues() {
+            // Fetch all issues by getting all pages
             try {
-                const params = new URLSearchParams();
+                const allIssues = [];
+                let page = 0;
+                const pageSize = 100;
                 
-                if (this.filters.search) {
-                    params.append('search', this.filters.search);
-                }
-                if (this.filters.severity) {
-                    params.append('severity', this.filters.severity);
-                }
-                if (this.filters.category) {
-                    params.append('category', this.filters.category);
-                }
-                if (this.filters.status) {
-                    params.append('status', this.filters.status);
+                while (true) {
+                    const params = new URLSearchParams();
+                    params.append('skip', String(page * pageSize));
+                    params.append('limit', String(pageSize));
+                    
+                    // Add scan filter
+                    if (this.showAllScans) {
+                        params.append('all_scans', 'true');
+                    } else if (this.selectedScanId) {
+                        params.append('scan_id', this.selectedScanId);
+                    }
+                    
+                    if (this.filters.search) {
+                        params.append('search', this.filters.search);
+                    }
+                    if (this.filters.severity) {
+                        params.append('severity', this.filters.severity);
+                    }
+                    if (this.filters.category) {
+                        params.append('category', this.filters.category);
+                    }
+                    if (this.filters.status) {
+                        params.append('status', this.filters.status);
+                    }
+                    
+                    const response = await fetch(`${this.apiUrl}/issues?${params}`);
+                    
+                    if (!response.ok) {
+                        throw new Error(`Failed to fetch issues: ${response.statusText}`);
+                    }
+                    
+                    const data = await response.json();
+                    const items = data.items || [];
+                    allIssues.push(...items);
+                    
+                    // Update pagination info
+                    this.pagination.total = data.total || 0;
+                    
+                    // Stop if we've fetched all
+                    if (items.length < pageSize || allIssues.length >= data.total) {
+                        break;
+                    }
+                    
+                    page++;
+                    
+                    // Safety limit
+                    if (page > 10) break;
                 }
                 
-                const response = await fetch(`${this.apiUrl}/issues?${params}`);
-                
-                if (!response.ok) {
-                    throw new Error(`Failed to fetch issues: ${response.statusText}`);
-                }
-                
-                const data = await response.json();
-                this.issues = data.items || [];
-                
-                console.log(`Loaded ${this.issues.length} issues`);
+                this.issues = allIssues;
+                console.log(`Loaded ${this.issues.length} issues (total: ${this.pagination.total})`);
             } catch (error) {
                 console.error('Error fetching issues:', error);
                 // In development/demo mode, use mock data
@@ -133,6 +178,31 @@ document.addEventListener('alpine:init', () => {
         },
         
         /**
+         * Fetch all scans for selector
+         */
+        async fetchScans() {
+            try {
+                const response = await fetch(`${this.apiUrl}/scans?limit=20`);
+                
+                if (!response.ok) {
+                    throw new Error(`Failed to fetch scans: ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                this.scans = data.items || [];
+                
+                // Auto-select latest scan if none selected
+                if (!this.selectedScanId && this.scans.length > 0) {
+                    this.selectedScanId = this.scans[0].id;
+                }
+                
+            } catch (error) {
+                console.error('Error fetching scans:', error);
+                this.scans = [];
+            }
+        },
+        
+        /**
          * Open the new scan modal
          */
         openScanModal() {
@@ -141,7 +211,8 @@ document.addEventListener('alpine:init', () => {
                 target_directory: '',
                 model: 'qwen2.5-coder:7b',
                 categories: ['code_smell', 'complexity', 'naming', 'structure', 'duplication', 'error_handling', 'security', 'performance', 'readability', 'best_practices'],
-                max_file_size_kb: 100
+                max_file_size_kb: 100,
+                clear_previous: false
             };
             this.showScanModal = true;
         },
@@ -166,7 +237,8 @@ document.addEventListener('alpine:init', () => {
                         target_directory: this.scanForm.target_directory,
                         model: this.scanForm.model,
                         categories: this.scanForm.categories,
-                        max_file_size_kb: parseInt(this.scanForm.max_file_size_kb)
+                        max_file_size_kb: parseInt(this.scanForm.max_file_size_kb),
+                        clear_previous: this.scanForm.clear_previous
                     })
                 });
                 
@@ -198,6 +270,15 @@ document.addEventListener('alpine:init', () => {
                     });
                 }
                 
+                // If clearing previous, select the new scan
+                if (this.scanForm.clear_previous) {
+                    this.selectedScanId = data.id;
+                    this.showAllScans = false;
+                }
+                
+                // Refresh scans list
+                this.fetchScans();
+                
                 // Refresh active scans after a moment
                 setTimeout(() => this.fetchActiveScans(), 500);
                 
@@ -214,6 +295,14 @@ document.addEventListener('alpine:init', () => {
         async createScan() {
             if (this.scanning) return;
             this.openScanModal();
+        },
+        
+        /**
+         * Handle scan selector change
+         */
+        async onScanChange() {
+            this.showAllScans = this.selectedScanId === 'all';
+            await this.fetchIssues();
         },
         
         /**
@@ -335,8 +424,9 @@ document.addEventListener('alpine:init', () => {
                     // Remove completed scan from active list
                     this.activeScans = this.activeScans.filter(s => s.id !== message.scan_id);
                     this.scanning = this.activeScans.length > 0;
-                    // Refresh issues list
+                    // Refresh issues list and scans
                     this.fetchIssues();
+                    this.fetchScans();
                     break;
                     
                 case 'scan_error':
@@ -520,6 +610,62 @@ document.addEventListener('alpine:init', () => {
         },
         
         /**
+         * Computed property: issues grouped by file
+         */
+        get issuesByFile() {
+            const grouped = {};
+            for (const issue of this.filteredIssues) {
+                const file = issue.file_path;
+                if (!grouped[file]) {
+                    grouped[file] = {
+                        file: file,
+                        issues: [],
+                        severity: 'low', // Will be upgraded to highest severity
+                        openCount: 0,
+                        inProgressCount: 0,
+                        resolvedCount: 0
+                    };
+                }
+                grouped[file].issues.push(issue);
+                
+                // Update counts
+                if (issue.status === 'open') grouped[file].openCount++;
+                if (issue.status === 'in_progress') grouped[file].inProgressCount++;
+                if (issue.status === 'resolved') grouped[file].resolvedCount++;
+                
+                // Upgrade severity if needed
+                const severityOrder = { 'critical': 4, 'high': 3, 'medium': 2, 'low': 1 };
+                const currentSev = severityOrder[grouped[file].severity] || 0;
+                const issueSev = severityOrder[issue.severity] || 0;
+                if (issueSev > currentSev) {
+                    // Find the key for this severity
+                    for (const [sev, val] of Object.entries(severityOrder)) {
+                        if (val === issueSev) {
+                            grouped[file].severity = sev;
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            // Convert to array and sort by severity
+            const result = Object.values(grouped).sort((a, b) => {
+                const severityOrder = { 'critical': 4, 'high': 3, 'medium': 2, 'low': 1 };
+                return (severityOrder[b.severity] || 0) - (severityOrder[a.severity] || 0);
+            });
+            
+            // Sort issues within each file by severity
+            for (const fileGroup of result) {
+                fileGroup.issues.sort((a, b) => {
+                    const severityOrder = { 'critical': 4, 'high': 3, 'medium': 2, 'low': 1 };
+                    return (severityOrder[b.severity] || 0) - (severityOrder[a.severity] || 0);
+                });
+            }
+            
+            return result;
+        },
+        
+        /**
          * Computed property: filtered issues based on current filters
          */
         get filteredIssues() {
@@ -529,7 +675,7 @@ document.addEventListener('alpine:init', () => {
                     const searchTerm = this.filters.search.toLowerCase();
                     const matchSearch = issue.title.toLowerCase().includes(searchTerm) ||
                                        issue.description?.toLowerCase().includes(searchTerm) ||
-                                       issue.file.toLowerCase().includes(searchTerm);
+                                       issue.file_path.toLowerCase().includes(searchTerm);
                     if (!matchSearch) return false;
                 }
                 

@@ -4,7 +4,7 @@ from sqlalchemy import func
 from typing import Optional, List
 
 from web.backend.database import get_db
-from web.backend.models import Issue, IssueSeverity, IssueCategory, IssueStatus
+from web.backend.models import Issue, IssueSeverity, IssueCategory, IssueStatus, Scan
 from web.backend.schemas import IssueResponse, IssueListResponse, IssueUpdate
 from web.backend.api.websocket import manager
 
@@ -16,6 +16,7 @@ async def list_issues(
     skip: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
     scan_id: Optional[str] = None,
+    all_scans: bool = Query(False, description="Include issues from all scans"),
     severity: Optional[IssueSeverity] = None,
     category: Optional[IssueCategory] = None,
     status: Optional[IssueStatus] = None,
@@ -24,6 +25,12 @@ async def list_issues(
 ):
     """List all issues with filters."""
     query = db.query(Issue)
+    
+    # Default to latest scan if no scan_id provided and all_scans is False
+    if not all_scans and not scan_id:
+        latest_scan = db.query(Scan).order_by(Scan.started_at.desc()).first()
+        if latest_scan:
+            scan_id = latest_scan.id
     
     # Apply filters
     if scan_id:
@@ -51,10 +58,18 @@ async def list_issues(
 @router.get("/summary")
 async def get_issues_summary(
     scan_id: Optional[str] = None,
+    all_scans: bool = Query(False, description="Include stats from all scans"),
     db: Session = Depends(get_db)
 ):
     """Get stats by severity and category."""
     query = db.query(Issue)
+    
+    # Default to latest scan if no scan_id provided and all_scans is False
+    if not all_scans and not scan_id:
+        latest_scan = db.query(Scan).order_by(Scan.started_at.desc()).first()
+        if latest_scan:
+            scan_id = latest_scan.id
+    
     if scan_id:
         query = query.filter(Issue.scan_id == scan_id)
     

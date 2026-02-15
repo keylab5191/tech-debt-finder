@@ -20,6 +20,7 @@ class ScanCreate(BaseModel):
     model: str = "qwen2.5-coder:7b"
     categories: List[str] = []
     max_file_size_kb: int = 100
+    clear_previous: bool = False
 
 
 class ScanUpdate(BaseModel):

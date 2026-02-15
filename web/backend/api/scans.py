@@ -4,7 +4,7 @@ from typing import List, Optional
 import os
 
 from web.backend.database import get_db
-from web.backend.models import Scan, ScanStatus
+from web.backend.models import Scan, ScanStatus, Issue
 from web.backend.schemas import ScanCreate, ScanResponse, ScanListResponse
 from web.backend.api.websocket import manager
 from web.backend.services.scan_manager import run_scan_in_background
@@ -21,6 +21,12 @@ async def create_scan(
     """Create and trigger a new scan."""
     if not os.path.exists(scan_data.target_directory):
         raise HTTPException(status_code=400, detail="Target directory does not exist")
+    
+    # Clear previous scans if requested
+    if scan_data.clear_previous:
+        db.query(Issue).delete()
+        db.query(Scan).delete()
+        db.commit()
     
     # Build config object from parameters
     config = {
@@ -99,6 +105,17 @@ async def delete_scan(scan_id: str, db: Session = Depends(get_db)):
     await manager.broadcast_scan_deleted(scan_id)
     
     return {"message": "Scan deleted successfully"}
+
+
+@router.delete("/clear-all")
+async def clear_all_scans(db: Session = Depends(get_db)):
+    """Delete all scans and their issues."""
+    # Delete all issues first (cascade should handle this, but being explicit)
+    db.query(Issue).delete()
+    db.query(Scan).delete()
+    db.commit()
+    
+    return {"message": "All scans cleared successfully"}
 
 
 @router.post("/import")
