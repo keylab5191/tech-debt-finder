@@ -480,12 +480,12 @@
                     <label class="block text-sm font-medium text-gray-700 mb-2">AI Model</label>
                     <select x-model="scanForm.model"
                             class="block w-full py-2 px-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500">
-                        <option value="qwen2.5-coder:7b">qwen2.5-coder:7b (Default - Fast)</option>
-                        <option value="qwen2.5-coder:14b">qwen2.5-coder:14b (Better quality)</option>
-                        <option value="deepseek-coder:6.7b">deepseek-coder:6.7b (Alternative)</option>
+                        <option value="qwen2.5-coder:3b">qwen2.5-coder:3b (Recommended - Fast, 8GB GPU)</option>
+                        <option value="qwen2.5-coder:7b">qwen2.5-coder:7b (Higher quality, needs more VRAM)</option>
+                        <option value="deepseek-coder:3b">deepseek-coder:3b (Alternative fast model)</option>
                         <option value="codellama:7b">codellama:7b (General purpose)</option>
                     </select>
-                    <p class="mt-1 text-xs text-gray-500">Larger models are slower but may find more issues</p>
+                    <p class="mt-1 text-xs text-gray-500">3B models are much faster on 8GB GPUs</p>
                 </div>
 
                 <!-- Categories -->

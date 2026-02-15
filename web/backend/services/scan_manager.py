@@ -89,31 +89,59 @@ class ScanManager:
             # Broadcast initial progress
             await manager.broadcast_scan_progress(self.scan_id, 0, total_work)
             
-            # Create HTTP client for reuse
-            async with httpx.AsyncClient(timeout=300.0) as client:
-                files_scanned = 0
-                total_issues = 0
-                
+            files_scanned = 0
+            total_issues = 0
+            
+            # Create ONE sync HTTP client for ALL files - reused across all files
+            print("[PERF] Creating shared HTTP client for all files...")
+            shared_sync_client = httpx.Client(timeout=300.0)
+            
+            # Pre-warm Ollama by sending a dummy request to ensure model stays loaded
+            print("[PERF] Pre-warming Ollama to keep model in GPU memory...")
+            try:
+                warm_up_response = shared_sync_client.post(
+                    f"{ollama_url.rstrip('/')}/api/generate",
+                    json={
+                        "model": model,
+                        "prompt": "Hello",
+                        "stream": False,
+                        "keep_alive": "60m",  # Keep model loaded for entire scan
+                    },
+                    timeout=60.0
+                )
+                warm_up_response.raise_for_status()
+                print("[PERF] Ollama warmed up and model is in GPU memory")
+            except Exception as e:
+                print(f"[WARN] Failed to pre-warm Ollama: {e}")
+            
+            try:
                 for category in scan_categories:
                     if self._stop_requested:
                         break
                     
                     category_name = category.value if category else "all"
+                    print(f"[PERF] Starting category: {category_name}")
                     
                     for file_path in files:
                         if self._stop_requested:
                             break
                         
+                        file_start_time = time.perf_counter()
+                        
                         try:
-                            # Run the file review
+                            print(f"[SCAN] Starting review of: {file_path.name}")
+                            # Run the file review with shared client
+                            review_start = time.perf_counter()
                             result = await self._review_file_async(
                                 file_path=file_path,
                                 target_dir=target_path,
                                 model=model,
                                 ollama_url=ollama_url,
-                                client=client,
+                                sync_client=shared_sync_client,
                                 category=category,
                             )
+                            review_time = time.perf_counter() - review_start
+                            print(f"[SCAN] Completed review of: {file_path.name} in {review_time:.2f}s - Found {len(result.issues)} issues")
                             
                             files_scanned += 1
                             scan.files_scanned = files_scanned
@@ -126,24 +154,38 @@ class ScanManager:
                                     self.db.add(issue)
                                     total_issues += 1
                                     scan.total_issues = total_issues
-                                    
-                                    # Notify about new issue
-                                    await manager.broadcast_new_issue(
-                                        self.scan_id, issue.id
-                                    )
                             
-                            # Update progress every file
-                            if files_scanned % 1 == 0:
+                            # Batch commit every 5 files instead of every file
+                            if files_scanned % 5 == 0:
                                 self.db.commit()
+                            
+                            # Broadcast progress every file
+                            if files_scanned % 1 == 0:
                                 await manager.broadcast_scan_progress(
                                     self.scan_id, files_scanned, total_work
                                 )
                             
+                            total_file_time = time.perf_counter() - file_start_time
+                            
+                            # Print timing every 10 files
+                            if files_scanned % 10 == 0:
+                                print(f"[PERF] File {files_scanned}/{total_work}: Review={review_time:.2f}s, Total={total_file_time:.2f}s - {file_path.name}")
+                            
                         except Exception as e:
                             # Log error but continue scanning
-                            print(f"Error scanning {file_path}: {e}")
+                            print(f"[ERROR] Error scanning {file_path}: {e}")
+                            import traceback
+                            traceback.print_exc()
                             files_scanned += 1
                             scan.files_scanned = files_scanned
+                    
+                    # Final commit for this category
+                    self.db.commit()
+                    print(f"[PERF] Finished category: {category_name}")
+            finally:
+                # Close the shared client
+                shared_sync_client.close()
+                print("[PERF] Closed shared HTTP client")
                 
                 # Finalize scan
                 if self._stop_requested:
@@ -173,45 +215,16 @@ class ScanManager:
         target_dir: Path,
         model: str,
         ollama_url: str,
-        client: httpx.AsyncClient,
+        sync_client: httpx.Client,
         category: CLICategory | None = None,
     ) -> Any:
         """Run review_file in a thread pool to make it async-friendly."""
         loop = asyncio.get_event_loop()
         
-        # Create a synchronous HTTP client wrapper
-        class AsyncClientWrapper:
-            def __init__(self, async_client: httpx.AsyncClient):
-                self._client = async_client
-            
-            def post(self, url: str, **kwargs) -> Any:
-                # Run async post in sync context
-                future = asyncio.run_coroutine_threadsafe(
-                    self._client.post(url, **kwargs),
-                    loop
-                )
-                response = future.result(timeout=300.0)
-                
-                # Wrap response to provide .json() method
-                class ResponseWrapper:
-                    def __init__(self, response):
-                        self._response = response
-                        self.status_code = response.status_code
-                        self.text = response.text
-                    
-                    def json(self):
-                        return self._response.json()
-                    
-                    def raise_for_status(self):
-                        self._response.raise_for_status()
-                
-                return ResponseWrapper(response)
-        
-        # Run the synchronous review_file function in executor
+        # Run the synchronous review_file function in executor with timeout
+        # Use the SHARED sync client - no more creating new clients!
         def run_review():
-            # Note: review_file expects httpx.Client, not AsyncClient
-            # We'll create a sync client for each call since mixing is complex
-            with httpx.Client(timeout=300.0) as sync_client:
+            try:
                 return review_file(
                     file_path=file_path,
                     target_dir=target_dir,
@@ -220,8 +233,25 @@ class ScanManager:
                     client=sync_client,
                     category=category,
                 )
+            except Exception as e:
+                print(f"[ERROR] review_file failed for {file_path}: {e}")
+                raise
         
-        return await loop.run_in_executor(None, run_review)
+        # Use wait_for to add timeout
+        try:
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, run_review),
+                timeout=60.0  # 60 second timeout per file
+            )
+        except asyncio.TimeoutError:
+            print(f"[TIMEOUT] File review timed out after 60s: {file_path}")
+            # Return empty result on timeout
+            from tech_debt_finder.models import ScanResult
+            return ScanResult(
+                file_path=str(file_path.relative_to(target_dir)),
+                model_used=model,
+                error="Timeout - Ollama took too long"
+            )
     
     def _create_issue_from_cli(self, cli_issue: Any) -> Issue:
         """Convert a CLI Issue model to a database Issue model."""

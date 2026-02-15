@@ -20,7 +20,7 @@ document.addEventListener('alpine:init', () => {
         // Scan Form
         scanForm: {
             target_directory: '',
-            model: 'qwen2.5-coder:7b',
+            model: 'qwen2.5-coder:3b',
             categories: ['code_smell', 'complexity', 'naming', 'structure', 'duplication', 'error_handling', 'security', 'performance', 'readability', 'best_practices'],
             max_file_size_kb: 100
         },
