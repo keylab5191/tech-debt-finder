@@ -6,7 +6,8 @@ from pathlib import Path
 
 # Add the project root to Python path
 project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root))
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
 import uvicorn
 
@@ -32,13 +33,19 @@ def main():
     print("=" * 60)
     print()
     
-    uvicorn.run(
-        "web.backend.main:app",
-        host="127.0.0.1",
-        port=8000,
-        reload=True,
-        reload_dirs=[str(Path(__file__).parent / "backend")],
-    )
+    try:
+        uvicorn.run(
+            "web.backend.main:app",
+            host="127.0.0.1",
+            port=8000,
+            reload=True,
+            reload_dirs=[str(Path(__file__).parent / "backend")],
+        )
+    except KeyboardInterrupt:
+        print("\nShutting down server...")
+    except Exception as e:
+        print(f"Error starting server: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
