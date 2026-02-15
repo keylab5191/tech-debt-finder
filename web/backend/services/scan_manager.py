@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from datetime import datetime
 from pathlib import Path
@@ -26,9 +27,25 @@ from tech_debt_finder.models import Category as CLICategory, ScanConfig
 
 
 class ScanManager:
-    """Manages background scan execution with progress tracking."""
+    """Manages background scan execution with progress tracking.
+    
+    This class is responsible for orchestrating the scanning process,
+    including initializing the database session, managing the scan lifecycle,
+    and broadcasting updates to connected clients via WebSocket.
+    
+    Attributes:
+        scan_id: Unique identifier for the scan.
+        db: SQLAlchemy database session.
+        _stop_requested: Flag to signal the scan to stop.
+    """
     
     def __init__(self, scan_id: str, db: Session):
+        """Initialize the ScanManager.
+        
+        Args:
+            scan_id: The unique identifier for the scan.
+            db: The database session to use for persistence.
+        """
         self.scan_id = scan_id
         self.db = db
         self._stop_requested = False
@@ -37,12 +54,28 @@ class ScanManager:
         self,
         target_directory: str,
         model: str,
-        ollama_url: str = "http://localhost:11434",
+        ollama_url: str = os.environ.get("OLLAMA_URL", "http://localhost:11434"),
         extensions: set[str] | None = None,
         max_file_size_kb: int = 100,
         categories: list[str] | None = None,
     ) -> None:
-        """Run a scan in the background with progress updates."""
+        """Run a scan in the background with progress updates.
+        
+        This method orchestrates the entire scanning workflow:
+        1. Loads or creates the scan record in the database.
+        2. Collects all files to be scanned.
+        3. Initializes an async HTTP client for Ollama communication.
+        4. Iterates through files and categories, performing reviews.
+        5. Saves results to the database and broadcasts progress.
+        
+        Args:
+            target_directory: Path to the directory to scan.
+            model: The Ollama model to use for analysis.
+            ollama_url: URL of the Ollama service.
+            extensions: File extensions to include in the scan.
+            max_file_size_kb: Maximum file size in kilobytes.
+            categories: List of categories to scan for.
+        """
         scan = self.db.query(Scan).filter(Scan.id == self.scan_id).first()
         if not scan:
             return
@@ -80,7 +113,7 @@ class ScanManager:
             scan.config = {
                 "model": model,
                 "ollama_url": ollama_url,
-                "extensions": list(extensions),
+                "extensions": list(extensions or set()),
                 "max_file_size_kb": max_file_size_kb,
                 "categories": [c.value if c else "all" for c in scan_categories],
             }
@@ -92,115 +125,105 @@ class ScanManager:
             files_scanned = 0
             total_issues = 0
             
-            # Create ONE sync HTTP client for ALL files - reused across all files
-            print("[PERF] Creating shared HTTP client for all files...")
-            shared_sync_client = httpx.Client(timeout=300.0)
-            
-            # Pre-warm Ollama by sending a dummy request to ensure model stays loaded
-            print("[PERF] Pre-warming Ollama to keep model in GPU memory...")
-            try:
-                warm_up_response = shared_sync_client.post(
-                    f"{ollama_url.rstrip('/')}/api/generate",
-                    json={
-                        "model": model,
-                        "prompt": "Hello",
-                        "stream": False,
-                        "keep_alive": "60m",  # Keep model loaded for entire scan
-                    },
-                    timeout=60.0
-                )
-                warm_up_response.raise_for_status()
-                print("[PERF] Ollama warmed up and model is in GPU memory")
-            except Exception as e:
-                print(f"[WARN] Failed to pre-warm Ollama: {e}")
-            
-            try:
-                for category in scan_categories:
-                    if self._stop_requested:
-                        break
-                    
-                    category_name = category.value if category else "all"
-                    print(f"[PERF] Starting category: {category_name}")
-                    
-                    for file_path in files:
+            # Create ONE async HTTP client for ALL files - reused across all files
+            # This improves performance by reusing connections and keeping the model loaded
+            print("[PERF] Creating shared async HTTP client for all files...")
+            async with httpx.AsyncClient(timeout=300.0) as shared_async_client:
+                
+                # Pre-warm Ollama by sending a dummy request to ensure model stays loaded
+                print("[PERF] Pre-warming Ollama to keep model in GPU memory...")
+                try:
+                    warm_up_response = await shared_async_client.post(
+                        f"{ollama_url.rstrip('/')}/api/generate",
+                        json={
+                            "model": model,
+                            "prompt": "Hello",
+                            "stream": False,
+                            "keep_alive": "60m",  # Keep model loaded for entire scan
+                        },
+                        timeout=60.0
+                    )
+                    warm_up_response.raise_for_status()
+                    print("[PERF] Ollama warmed up and model is in GPU memory")
+                except Exception as e:
+                    print(f"[WARN] Failed to pre-warm Ollama: {e}")
+                
+                try:
+                    for category in scan_categories:
                         if self._stop_requested:
                             break
                         
-                        file_start_time = time.perf_counter()
+                        category_name = category.value if category else "all"
+                        print(f"[PERF] Starting category: {category_name}")
                         
-                        try:
-                            print(f"[SCAN] Starting review of: {file_path.name}")
-                            # Run the file review with shared client
-                            review_start = time.perf_counter()
-                            result = await self._review_file_async(
-                                file_path=file_path,
-                                target_dir=target_path,
-                                model=model,
-                                ollama_url=ollama_url,
-                                sync_client=shared_sync_client,
-                                category=category,
-                            )
-                            review_time = time.perf_counter() - review_start
-                            print(f"[SCAN] Completed review of: {file_path.name} in {review_time:.2f}s - Found {len(result.issues)} issues")
+                        for file_path in files:
+                            if self._stop_requested:
+                                break
                             
-                            files_scanned += 1
-                            scan.files_scanned = files_scanned
-                            
-                            # Save issues to database
-                            if result.issues:
-                                for cli_issue in result.issues:
-                                    issue = self._create_issue_from_cli(cli_issue)
-                                    issue.scan_id = self.scan_id
-                                    self.db.add(issue)
-                                    total_issues += 1
-                                    scan.total_issues = total_issues
-                            
-                            # Batch commit every 5 files instead of every file
-                            if files_scanned % 5 == 0:
-                                self.db.commit()
+                            file_start_time = time.perf_counter()
                             
                             # Broadcast progress every 10 files
                             if files_scanned % 10 == 0:
                                 await manager.broadcast_scan_progress(
                                     self.scan_id, files_scanned, total_work
                                 )
-                            
-                            total_file_time = time.perf_counter() - file_start_time
-                            
-                            # Print timing every 10 files
-                            if files_scanned % 10 == 0:
-                                print(f"[PERF] File {files_scanned}/{total_work}: Review={review_time:.2f}s, Total={total_file_time:.2f}s - {file_path.name}")
-                            
-                        except Exception as e:
-                            # Log error but continue scanning
-                            print(f"[ERROR] Error scanning {file_path}: {e}")
-                            import traceback
-                            traceback.print_exc()
-                            files_scanned += 1
-                            scan.files_scanned = files_scanned
+                                review_time = time.perf_counter() - review_start
+                                print(f"[SCAN] Completed review of: {file_path.name} in {review_time:.2f}s - Found {len(result.issues)} issues")
+                                
+                                files_scanned += 1
+                                scan.files_scanned = files_scanned
+                                
+                                # Save issues to database
+                                if result.issues:
+                                    for cli_issue in result.issues:
+                                        issue = self._create_issue_from_cli(cli_issue)
+                                        issue.scan_id = self.scan_id
+                                        self.db.add(issue)
+                                        total_issues += 1
+                                        scan.total_issues = total_issues
+                                
+                                # Batch commit every 5 files instead of every file
+                                if files_scanned % 5 == 0:
+                                    self.db.commit()
+                                
+                                # Broadcast progress every file
+                                if files_scanned % 1 == 0:
+                                    await manager.broadcast_scan_progress(
+                                        self.scan_id, files_scanned, total_work
+                                    )
+                                
+                                total_file_time = time.perf_counter() - file_start_time
+                                
+                                # Print timing every 10 files
+                                if files_scanned % 10 == 0:
+                                    print(f"[PERF] File {files_scanned}/{total_work}: Review={review_time:.2f}s, Total={total_file_time:.2f}s - {file_path.name}")
+                                
+                            except Exception as e:
+                                # Log error but continue scanning
+                                print(f"[ERROR] Error scanning {file_path}: {e}")
+                                import traceback
+                                traceback.print_exc()
+                                files_scanned += 1
+                                scan.files_scanned = files_scanned
+                        
+                        # Final commit for this category
+                        self.db.commit()
+                        print(f"[PERF] Finished category: {category_name}")
+                finally:
+                    # Finalize scan
+                    if self._stop_requested:
+                        scan.status = ScanStatus.failed
+                        await manager.broadcast_scan_failed(
+                            self.scan_id, "Scan was stopped"
+                        )
+                    else:
+                        scan.status = ScanStatus.completed
+                        scan.completed_at = datetime.utcnow()
+                        await manager.broadcast_scan_completed(
+                            self.scan_id, scan.total_issues
+                        )
                     
-                    # Final commit for this category
                     self.db.commit()
-                    print(f"[PERF] Finished category: {category_name}")
-            finally:
-                # Close the shared client
-                shared_sync_client.close()
-                print("[PERF] Closed shared HTTP client")
-                
-                # Finalize scan
-                if self._stop_requested:
-                    scan.status = ScanStatus.failed
-                    await manager.broadcast_scan_failed(
-                        self.scan_id, "Scan was stopped"
-                    )
-                else:
-                    scan.status = ScanStatus.completed
-                    scan.completed_at = datetime.utcnow()
-                    await manager.broadcast_scan_completed(
-                        self.scan_id, scan.total_issues
-                    )
-                
-                self.db.commit()
                 
         except Exception as e:
             # Handle scan failure
@@ -215,14 +238,30 @@ class ScanManager:
         target_dir: Path,
         model: str,
         ollama_url: str,
-        sync_client: httpx.Client,
+        async_client: httpx.AsyncClient,
         category: CLICategory | None = None,
     ) -> Any:
-        """Run review_file in a thread pool to make it async-friendly."""
+        """Run review_file in a thread pool to make it async-friendly.
+        
+        This method wraps the synchronous review_file function in an executor
+        to prevent blocking the event loop. It passes the shared async client
+        to the review function for making HTTP requests.
+        
+        Args:
+            file_path: Path to the file to review.
+            target_dir: Base directory of the scan.
+            model: The model to use.
+            ollama_url: The Ollama URL.
+            async_client: The shared async HTTP client.
+            category: Optional category to filter issues.
+            
+        Returns:
+            The ScanResult from the review.
+        """
         loop = asyncio.get_event_loop()
         
         # Run the synchronous review_file function in executor with timeout
-        # Use the SHARED sync client - no more creating new clients!
+        # Use the SHARED async client - no more creating new clients!
         def run_review():
             try:
                 return review_file(
@@ -230,7 +269,7 @@ class ScanManager:
                     target_dir=target_dir,
                     model=model,
                     ollama_url=ollama_url,
-                    client=sync_client,
+                    client=async_client,
                     category=category,
                 )
             except Exception as e:
@@ -254,7 +293,18 @@ class ScanManager:
             )
     
     def _create_issue_from_cli(self, cli_issue: Any) -> Issue:
-        """Convert a CLI Issue model to a database Issue model."""
+        """Convert a CLI Issue model to a database Issue model.
+        
+        This method maps the lightweight CLI Issue object to the database
+        Issue model, translating enums for severity and category into the
+        database-compatible formats.
+        
+        Args:
+            cli_issue: The CLI issue object to convert.
+            
+        Returns:
+            An Issue model instance ready to be added to the database.
+        """
         # Map severity
         severity_map = {
             "critical": IssueSeverity.critical,
@@ -298,7 +348,11 @@ class ScanManager:
         )
     
     def stop(self) -> None:
-        """Request to stop the scan."""
+        """Request to stop the scan.
+        
+        Sets an internal flag that the run_scan method checks periodically.
+        This allows for graceful shutdown of the scanning process.
+        """
         self._stop_requested = True
 
 
@@ -308,7 +362,24 @@ async def run_scan_in_background(
     model: str,
     **kwargs: Any,
 ) -> None:
-    """Helper function to run a scan in background with its own DB session."""
+    """Helper function to run a scan in background with its own DB session.
+    
+    This function creates a new database session, instantiates a ScanManager,
+    and runs the scan. It ensures proper cleanup of the database session
+    regardless of the scan outcome.
+    
+    Prerequisites:
+        - Ollama must be running and accessible at the URL specified in kwargs or environment variable.
+        - The specified model must be available in Ollama.
+        - The target directory must exist and be accessible.
+        - Database must be accessible.
+    
+    Args:
+        scan_id: Unique identifier for the scan.
+        target_directory: Directory to scan.
+        model: The LLM model to use.
+        **kwargs: Additional arguments passed to ScanManager.run_scan.
+    """
     db = SessionLocal()
     try:
         manager_instance = ScanManager(scan_id, db)
