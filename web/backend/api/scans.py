@@ -49,7 +49,7 @@ async def create_scan(
         scan.id,
         scan.target_directory,
         scan.model,
-        ollama_url="http://localhost:11434",
+        ollama_url=os.environ.get("OLLAMA_URL", "http://localhost:11434"),
         extensions=None,  # Use default extensions
         max_file_size_kb=scan_data.max_file_size_kb,
         categories=scan_data.categories or None,

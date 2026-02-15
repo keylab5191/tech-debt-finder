@@ -142,13 +142,12 @@ def _check_duplicate_scan(
     results: list[dict[str, Any]],
 ) -> bool:
     """Check if a duplicate scan exists for the given target directory."""
-    existing = db.query(Scan).filter(
-        Scan.target_directory == target_directory,
-    ).first()
+    existing_scans = check_for_duplicates(target_directory, db)
     
-    if not existing:
+    if not existing_scans:
         return False
     
+    existing = existing_scans[0]
     existing_files = {issue.file_path for issue in existing.issues}
     new_files = {result.get("file_path", "") for result in results}
     
@@ -180,13 +179,26 @@ def _process_result(
     stats["files_processed"] += 1
     
     for issue_data in issues:
-        try:
-            issue = _create_issue_from_data(issue_data, scan_id, file_path)
-            if issue:
-                stats.setdefault("issues_list", []).append(issue)
-                stats["issues_created"] += 1
-        except Exception as e:
-            stats["errors"].append(f"Error creating issue for {file_path}: {e}")
+        issue, error = _try_create_issue(issue_data, scan_id, file_path)
+        if error:
+            stats["errors"].append(f"Error creating issue for {file_path}: {error}")
+            continue
+        if issue:
+            stats.setdefault("issues_list", []).append(issue)
+            stats["issues_created"] += 1
+
+
+def _try_create_issue(
+    issue_data: dict[str, Any],
+    scan_id: str,
+    file_path: str,
+) -> tuple[Issue | None, str | None]:
+    """Try to create an issue, returning tuple of (issue, error)."""
+    try:
+        issue = _create_issue_from_data(issue_data, scan_id, file_path)
+        return issue, None
+    except Exception as e:
+        return None, str(e)
 
 
 def _create_issue_from_data(
