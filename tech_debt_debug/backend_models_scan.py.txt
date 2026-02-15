@@ -1,0 +1,12 @@
+```json
+[
+  {
+    "title": "N+1 Query Problem",
+    "severity": "medium",
+    "category": "performance",
+    "description": "The `issues` relationship is defined as a many-to-one relationship, but it does not include any join conditions or eager loading. This means that when you query a `Scan` object, all related `Issue` objects will be fetched individually using separate queries, leading to N+1 query problems.",
+    "suggestion": "Use SQLAlchemy's eager loading feature by adding `relationship("Issue", back_populates="scan", cascade="all, delete-orphan", lazy="joined")` to the `issues` attribute in the `Scan` class. This will fetch all related `Issue` objects in a single query.",
+    "line_range": "10-25"
+  }
+]
+```

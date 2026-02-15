@@ -162,17 +162,10 @@ class ScanManager:
                             
                             file_start_time = time.perf_counter()
                             
-                            try:
-                                print(f"[SCAN] Starting review of: {file_path.name}")
-                                # Run the file review with shared client
-                                review_start = time.perf_counter()
-                                result = await self._review_file_async(
-                                    file_path=file_path,
-                                    target_dir=target_path,
-                                    model=model,
-                                    ollama_url=ollama_url,
-                                    async_client=shared_async_client,
-                                    category=category,
+                            # Broadcast progress every 10 files
+                            if files_scanned % 10 == 0:
+                                await manager.broadcast_scan_progress(
+                                    self.scan_id, files_scanned, total_work
                                 )
                                 review_time = time.perf_counter() - review_start
                                 print(f"[SCAN] Completed review of: {file_path.name} in {review_time:.2f}s - Found {len(result.issues)} issues")
