@@ -411,6 +411,18 @@
         },
         
         /**
+         * Handle fix progress updates
+         */
+        handleFixProgress(message) {
+            console.log('Fix progress:', message);
+            if (window.dispatchEvent) {
+                window.dispatchEvent(new CustomEvent('fix-progress', {
+                    detail: message
+                }));
+            }
+        },
+        
+        /**
          * Handle connection status changes
          */
         handleConnection(message) {
@@ -437,6 +449,9 @@
                 break;
             case 'scan_error':
                 MessageHandlers.handleScanError(message);
+                break;
+            case 'fix_progress':
+                MessageHandlers.handleFixProgress(message);
                 break;
             case 'connection':
             case 'ping':

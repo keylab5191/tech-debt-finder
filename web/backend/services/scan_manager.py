@@ -159,8 +159,8 @@ class ScanManager:
                             if files_scanned % 5 == 0:
                                 self.db.commit()
                             
-                            # Broadcast progress every file
-                            if files_scanned % 1 == 0:
+                            # Broadcast progress every 10 files
+                            if files_scanned % 10 == 0:
                                 await manager.broadcast_scan_progress(
                                     self.scan_id, files_scanned, total_work
                                 )

@@ -149,6 +149,24 @@ class ConnectionManager:
         }
         await self.broadcast_to_scan(scan_id, message)
         await self.broadcast(message)
+    
+    async def broadcast_fix_progress(self, scan_id: str, issue_ids: list, status: str, message: str = "", model: str = None, duration: float = None, result: str = None, cost: float = None, input_tokens: int = None, output_tokens: int = None):
+        """Broadcast fix progress."""
+        msg = {
+            "type": "fix_progress",
+            "scan_id": scan_id,
+            "issue_ids": issue_ids,
+            "status": status,
+            "message": message,
+            "model": model,
+            "duration": duration,
+            "result": result,
+            "cost": cost,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens
+        }
+        await self.broadcast_to_scan(scan_id, msg)
+        await self.broadcast(msg)
 
 
 # Global connection manager instance

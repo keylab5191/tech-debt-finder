@@ -40,3 +40,20 @@ class IssueResponse(IssueBase):
 class IssueListResponse(BaseModel):
     items: List[IssueResponse]
     total: int
+
+
+class FixRequest(BaseModel):
+    issue_ids: List[str]
+
+
+class FixResult(BaseModel):
+    issue_id: str
+    file_path: str
+    success: bool
+    message: str
+
+
+class FixResponse(BaseModel):
+    results: List[FixResult]
+    total_success: int
+    total_failed: int

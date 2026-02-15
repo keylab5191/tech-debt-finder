@@ -3,7 +3,9 @@ document.addEventListener('alpine:init', () => {
     Alpine.data('techDebtApp', () => ({
         // State
         issues: [],
+        selectedIssues: [],
         activeScans: [],
+        activeFixes: [],  // Track active fixes
         scanning: false,
         viewMode: 'list',
         groupByFile: true,
@@ -357,6 +359,64 @@ document.addEventListener('alpine:init', () => {
         },
         
         /**
+         * Toggle issue selection
+         */
+        toggleIssueSelection(issueId) {
+            if (this.selectedIssues.includes(issueId)) {
+                this.selectedIssues = this.selectedIssues.filter(id => id !== issueId);
+            } else {
+                this.selectedIssues.push(issueId);
+            }
+        },
+        
+        /**
+         * Select all visible issues
+         */
+        selectAllIssues() {
+            if (this.selectedIssues.length === this.filteredIssues.length) {
+                this.selectedIssues = [];
+            } else {
+                this.selectedIssues = this.filteredIssues.map(i => i.id);
+            }
+        },
+        
+        /**
+         * Fix selected issues
+         */
+        async fixSelectedIssues() {
+            if (this.selectedIssues.length === 0) return;
+            
+            if (!confirm(`Fix ${this.selectedIssues.length} issues? This will modify code files.`)) return;
+            
+            this.scanning = true; // Reuse scanning state for loading indicator
+            
+            try {
+                const response = await fetch(`${this.apiUrl}/issues/fix`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ issue_ids: this.selectedIssues })
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`Failed to fix issues: ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                
+                // Clear selection immediately as it's async now
+                this.selectedIssues = [];
+                
+                alert(data.message + ` (Total: ${data.total_issues})`);
+                
+            } catch (error) {
+                console.error('Error fixing issues:', error);
+                alert('Failed to fix issues: ' + error.message);
+            } finally {
+                this.scanning = false;
+            }
+        },
+        
+        /**
          * Open issue detail modal
          */
         openIssueModal(issue) {
@@ -435,7 +495,57 @@ document.addEventListener('alpine:init', () => {
                     this.activeScans = this.activeScans.filter(s => s.id !== message.scan_id);
                     this.scanning = false;
                     break;
+                    
+                case 'fix_progress':
+                    this.handleFixProgress(message);
+                    break;
             }
+        },
+        
+        /**
+         * Handle fix progress updates from WebSocket
+         */
+        handleFixProgress(message) {
+            const { issue_ids, status, message: msg, model, duration, result, cost, input_tokens, output_tokens } = message;
+            
+            // Find or create fix entry
+            let fixEntry = this.activeFixes.find(f => 
+                f.issue_ids && f.issue_ids.length === issue_ids.length && 
+                f.issue_ids.every(id => issue_ids.includes(id))
+            );
+            
+            if (!fixEntry) {
+                fixEntry = {
+                    issue_ids: issue_ids,
+                    status: status,
+                    message: msg,
+                    model: model,
+                    duration: duration,
+                    result: result,
+                    cost: cost,
+                    input_tokens: input_tokens,
+                    output_tokens: output_tokens,
+                    startedAt: new Date()
+                };
+                this.activeFixes.push(fixEntry);
+            } else {
+                // Update existing
+                fixEntry.status = status;
+                fixEntry.message = msg;
+                if (model) fixEntry.model = model;
+                if (duration) fixEntry.duration = duration;
+                if (result) fixEntry.result = result;
+                if (cost !== undefined) fixEntry.cost = cost;
+                if (input_tokens !== undefined) fixEntry.input_tokens = input_tokens;
+                if (output_tokens !== undefined) fixEntry.output_tokens = output_tokens;
+            }
+            
+            // Don't auto-remove - keep results visible until page refresh
+            // Refresh issues to show updated status
+            this.fetchIssues();
+            
+            // Use scanning indicator if there are active fixes
+            this.scanning = this.activeScans.length > 0 || this.activeFixes.length > 0;
         },
         
         /**
