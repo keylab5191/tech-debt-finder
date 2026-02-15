@@ -65,87 +65,25 @@ def import_legacy_report(
         "errors": [],
     }
     
+    metadata = _extract_report_metadata(report_data)
+    results = metadata.pop("results")
+    
+    if skip_duplicates and _check_duplicate_scan(db, metadata["target_directory"], results):
+        stats["duplicates_skipped"] += 1
+        return stats
+    
+    scan = _create_scan_from_metadata(metadata)
+    
     try:
-        # Extract report metadata
-        target_directory = report_data.get("target_directory", "unknown")
-        scan_started_at = report_data.get("scan_started_at")
-        scan_completed_at = report_data.get("scan_completed_at")
-        total_files = report_data.get("total_files_scanned", 0)
-        total_issues = report_data.get("total_issues", 0)
-        config = report_data.get("config", {})
-        results = report_data.get("results", [])
-        
-        # Check for existing scan with same target and timestamp
-        if skip_duplicates:
-            existing = db.query(Scan).filter(
-                Scan.target_directory == target_directory,
-            ).first()
-            
-            if existing:
-                # Check if this is the same scan by comparing file paths
-                existing_files = {
-                    issue.file_path for issue in existing.issues
-                }
-                new_files = {
-                    result.get("file_path", "") for result in results
-                }
-                
-                if existing_files == new_files:
-                    stats["duplicates_skipped"] += 1
-                    return stats
-        
-        # Create new scan record
-        scan = Scan(
-            target_directory=target_directory,
-            model=config.get("model", "unknown"),
-            status=ScanStatus.completed,
-            total_files=total_files,
-            files_scanned=total_files,
-            total_issues=total_issues,
-            config=config,
-        )
-        
-        # Parse timestamps if available
-        if scan_started_at:
-            try:
-                scan.started_at = datetime.fromisoformat(scan_started_at.replace("Z", "+00:00"))
-            except (ValueError, AttributeError):
-                scan.started_at = datetime.utcnow()
-        
-        if scan_completed_at:
-            try:
-                scan.completed_at = datetime.fromisoformat(scan_completed_at.replace("Z", "+00:00"))
-            except (ValueError, AttributeError):
-                scan.completed_at = datetime.utcnow()
-        
         db.add(scan)
-        db.flush()  # Get the scan ID
+        db.flush()
         stats["scans_created"] = 1
         
-        # Process each result (file)
-        for result in results:
-            try:
-                file_path = result.get("file_path", "")
-                issues = result.get("issues", [])
-                
-                stats["files_processed"] += 1
-                
-                # Create issues for this file
-                for issue_data in issues:
-                    try:
-                        issue = _create_issue_from_data(
-                            issue_data, scan.id, file_path
-                        )
-                        if issue:
-                            db.add(issue)
-                            stats["issues_created"] += 1
-                    except Exception as e:
-                        stats["errors"].append(
-                            f"Error creating issue for {file_path}: {e}"
-                        )
-                
-            except Exception as e:
-                stats["errors"].append(f"Error processing result: {e}")
+        _process_results(results, scan.id, stats)
+        
+        issues_list = stats.pop("issues_list", [])
+        for issue in issues_list:
+            db.add(issue)
         
         db.commit()
         
@@ -155,6 +93,100 @@ def import_legacy_report(
         raise
     
     return stats
+
+
+def _extract_report_metadata(report_data: dict[str, Any]) -> dict[str, Any]:
+    """Extract and parse metadata from the report data."""
+    return {
+        "target_directory": report_data.get("target_directory", "unknown"),
+        "scan_started_at": report_data.get("scan_started_at"),
+        "scan_completed_at": report_data.get("scan_completed_at"),
+        "total_files": report_data.get("total_files_scanned", 0),
+        "total_issues": report_data.get("total_issues", 0),
+        "config": report_data.get("config", {}),
+        "results": report_data.get("results", []),
+    }
+
+
+def _create_scan_from_metadata(metadata: dict[str, Any]) -> Scan:
+    """Create a Scan object from extracted metadata."""
+    scan = Scan(
+        target_directory=metadata["target_directory"],
+        model=metadata["config"].get("model", "unknown"),
+        status=ScanStatus.completed,
+        total_files=metadata["total_files"],
+        files_scanned=metadata["total_files"],
+        total_issues=metadata["total_issues"],
+        config=metadata["config"],
+    )
+    
+    scan.started_at = _parse_timestamp(metadata["scan_started_at"]) or datetime.utcnow()
+    scan.completed_at = _parse_timestamp(metadata["scan_completed_at"]) or datetime.utcnow()
+    
+    return scan
+
+
+def _parse_timestamp(timestamp_str: str | None) -> datetime | None:
+    """Parse an ISO format timestamp string."""
+    if not timestamp_str:
+        return None
+    try:
+        return datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+
+
+def _check_duplicate_scan(
+    db: Session,
+    target_directory: str,
+    results: list[dict[str, Any]],
+) -> bool:
+    """Check if a duplicate scan exists for the given target directory."""
+    existing = db.query(Scan).filter(
+        Scan.target_directory == target_directory,
+    ).first()
+    
+    if not existing:
+        return False
+    
+    existing_files = {issue.file_path for issue in existing.issues}
+    new_files = {result.get("file_path", "") for result in results}
+    
+    return existing_files == new_files
+
+
+def _process_results(
+    results: list[dict[str, Any]],
+    scan_id: str,
+    stats: dict[str, Any],
+) -> None:
+    """Process a list of results, handling errors for each result."""
+    for result in results:
+        try:
+            _process_result(result, scan_id, stats)
+        except Exception as e:
+            stats["errors"].append(f"Error processing result: {e}")
+
+
+def _process_result(
+    result: dict[str, Any],
+    scan_id: str,
+    stats: dict[str, Any],
+) -> None:
+    """Process a single result (file) from the report."""
+    file_path = result.get("file_path", "")
+    issues = result.get("issues", [])
+    
+    stats["files_processed"] += 1
+    
+    for issue_data in issues:
+        try:
+            issue = _create_issue_from_data(issue_data, scan_id, file_path)
+            if issue:
+                stats.setdefault("issues_list", []).append(issue)
+                stats["issues_created"] += 1
+        except Exception as e:
+            stats["errors"].append(f"Error creating issue for {file_path}: {e}")
 
 
 def _create_issue_from_data(

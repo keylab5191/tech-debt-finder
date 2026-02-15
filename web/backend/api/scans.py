@@ -52,7 +52,7 @@ async def create_scan(
         ollama_url="http://localhost:11434",
         extensions=None,  # Use default extensions
         max_file_size_kb=scan_data.max_file_size_kb,
-        categories=scan_data.categories if scan_data.categories else None,
+        categories=scan_data.categories or None,
     )
     
     return scan

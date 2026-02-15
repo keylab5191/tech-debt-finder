@@ -35,28 +35,17 @@ def estimate_cost(model: str, input_tokens: int = 1000, output_tokens: int = 500
     return (input_tokens / 1_000_000 * pricing["input"]) + (output_tokens / 1_000_000 * pricing["output"])
 
 
-@router.get("", response_model=IssueListResponse)
-async def list_issues(
-    skip: int = Query(0, ge=0),
-    limit: int = Query(20, ge=1, le=100),
-    scan_id: Optional[str] = None,
-    all_scans: bool = Query(False, description="Include issues from all scans"),
-    severity: Optional[IssueSeverity] = None,
-    category: Optional[IssueCategory] = None,
-    status: Optional[IssueStatus] = None,
-    search: Optional[str] = None,
-    db: Session = Depends(get_db)
-):
-    """List all issues with filters."""
-    query = db.query(Issue)
+def _get_scan_id(db: Session, scan_id: Optional[str], all_scans: bool) -> Optional[str]:
+    if all_scans or scan_id:
+        return scan_id
     
-    # Default to latest scan if no scan_id provided and all_scans is False
-    if not all_scans and not scan_id:
-        latest_scan = db.query(Scan).order_by(Scan.started_at.desc()).first()
-        if latest_scan:
-            scan_id = latest_scan.id
-    
-    # Apply filters
+    latest_scan = db.query(Scan).order_by(Scan.started_at.desc()).first()
+    if latest_scan:
+        return latest_scan.id
+    return None
+
+
+def _apply_filters(query, scan_id=None, severity=None, category=None, status=None, search=None):
     if scan_id:
         query = query.filter(Issue.scan_id == scan_id)
     if severity:
@@ -72,6 +61,32 @@ async def list_issues(
             (Issue.description.ilike(search_filter)) |
             (Issue.file_path.ilike(search_filter))
         )
+    return query
+
+
+@router.get("", response_model=IssueListResponse)
+async def list_issues(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+    scan_id: Optional[str] = None,
+    all_scans: bool = Query(False, description="Include issues from all scans"),
+    severity: Optional[IssueSeverity] = None,
+    category: Optional[IssueCategory] = None,
+    status: Optional[IssueStatus] = None,
+    search: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """List all issues with filters."""
+    resolved_scan_id = _get_scan_id(db, scan_id, all_scans)
+    
+    query = _apply_filters(
+        db.query(Issue),
+        scan_id=resolved_scan_id,
+        severity=severity,
+        category=category,
+        status=status,
+        search=search
+    )
     
     total = query.count()
     issues = query.order_by(Issue.created_at.desc()).offset(skip).limit(limit).all()
@@ -86,30 +101,20 @@ async def get_issues_summary(
     db: Session = Depends(get_db)
 ):
     """Get stats by severity and category."""
-    query = db.query(Issue)
+    resolved_scan_id = _get_scan_id(db, scan_id, all_scans)
     
-    # Default to latest scan if no scan_id provided and all_scans is False
-    if not all_scans and not scan_id:
-        latest_scan = db.query(Scan).order_by(Scan.started_at.desc()).first()
-        if latest_scan:
-            scan_id = latest_scan.id
+    query = _apply_filters(db.query(Issue), scan_id=resolved_scan_id)
     
-    if scan_id:
-        query = query.filter(Issue.scan_id == scan_id)
-    
-    # Count by severity
     severity_counts = query.with_entities(
         Issue.severity,
         func.count(Issue.id)
     ).group_by(Issue.severity).all()
     
-    # Count by category
     category_counts = query.with_entities(
         Issue.category,
         func.count(Issue.id)
     ).group_by(Issue.category).all()
     
-    # Count by status
     status_counts = query.with_entities(
         Issue.status,
         func.count(Issue.id)
