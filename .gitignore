@@ -27,5 +27,4 @@ Thumbs.db
 # Project specific
 tech_debt_report.json
 *.log
-web/tech_debt.db
-fix/web/tech_debt.db
+tech_debt.db
