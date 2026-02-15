@@ -229,13 +229,14 @@ async def run_fix_background(issue_ids: List[str], base_dir: str):
             
             # Broadcast fix start
             scan_ids = list(set([i.scan_id for i in file_issues]))
+            model_name = OPENCODE_MODEL or "opencode/big-pickle"
             if scan_ids:
                 await manager.broadcast_fix_progress(
                     scan_ids[0], 
                     [i.id for i in file_issues], 
                     "in_progress", 
                     f"Starting fix for {file_path}",
-                    model=OPENCODE_MODEL or "default"
+                    model=model_name
                 )
             
             try:
@@ -254,30 +255,75 @@ async def run_fix_background(issue_ids: List[str], base_dir: str):
                 start_time = time.time()
                 
                 try:
-                    cmd_str = f'"{opencode_cmd}" run {prompt}'
+                    # Properly escape prompt for Windows shell
+                    escaped_prompt = prompt.replace('"', '\\"')
+                    cmd_str = f'"{opencode_cmd}" run "{escaped_prompt}"'
                     
                     loop = asyncio.get_event_loop()
                     
-                    def run_subprocess():
-                        result = subprocess.run(
+                    # Use Popen to stream output in real-time
+                    def run_subprocess_with_streaming():
+                        process = subprocess.Popen(
                             cmd_str,
                             shell=True,
-                            capture_output=True,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
                             cwd=str(fix_path),
                             encoding='utf-8',
                             errors='replace'
                         )
-                        return result
+                        
+                        import re
+                        
+                        def strip_ansi(text):
+                            """Remove ANSI escape codes from text"""
+                            ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+                            return ansi_escape.sub('', text)
+                        
+                        # Stream stdout
+                        stdout_buffer = []
+                        while True:
+                            line = process.stdout.readline() if process.stdout else ""
+                            if not line and process.poll() is not None:
+                                break
+                            if line:
+                                clean_line = strip_ansi(line)
+                                stdout_buffer.append(clean_line)
+                                print(f"[FIX BG] stdout: {clean_line[:200]}...")
+                                # Broadcast the output line
+                                try:
+                                    loop.call_soon_threadsafe(asyncio.ensure_future, 
+                                        manager.broadcast_fix_progress(
+                                            scan_ids[0] if scan_ids else "",
+                                            [i.id for i in file_issues] if file_issues else [],
+                                            "in_progress",
+                                            f"Output: {clean_line[:500]}",
+                                            model=model_name,
+                                            duration=time.time() - start_time
+                                        )
+                                    )
+                                except Exception as e:
+                                    print(f"[FIX BG] Streaming broadcast error: {e}")
+                        
+                        # Get remaining stderr
+                        stderr_output = process.stderr.read() if process.stderr else ""
+                        returncode = process.returncode
+                        
+                        return {
+                            'returncode': returncode,
+                            'stdout': "".join(stdout_buffer),  # Already streamed but keep for debug
+                            'stderr': stderr_output
+                        }
                     
-                    result = await loop.run_in_executor(None, run_subprocess)
+                    result = await loop.run_in_executor(None, run_subprocess_with_streaming)
                     
                     duration = time.time() - start_time
                     
-                    print(f"[FIX BG] stdout: {result.stdout[:500]}...")
-                    print(f"[FIX BG] returncode: {result.returncode}, duration: {duration:.1f}s")
+                    print(f"[FIX BG] returncode: {result['returncode']}, duration: {duration:.1f}s")
                     
-                    returncode = result.returncode
-                    stdout = result.stdout
+                    returncode = result['returncode']
+                    stdout = result['stdout']
+                    stderr = result['stderr']
                     
                 except Exception as e:
                     import traceback
@@ -285,7 +331,10 @@ async def run_fix_background(issue_ids: List[str], base_dir: str):
                     print(f"[FIX BG] Traceback: {traceback.format_exc()}")
                     raise
                 
-                print(f"[FIX BG] returncode: {returncode}")
+                print(f"[FIX BG] returncode: {returncode}, duration: {duration}")
+                
+                # Initialize result_preview
+                result_preview = ""
                 
                 if returncode == 0:
                     for issue in file_issues:
@@ -303,21 +352,27 @@ async def run_fix_background(issue_ids: List[str], base_dir: str):
                     output_tokens = len(stdout) // 4 if stdout else 0
                     estimated_cost = estimate_cost(OPENCODE_MODEL or "big-pickle", input_tokens, output_tokens)
                     
-                    # Get first line of result for display
-                    result_preview = stdout.strip().split('\n')[0][:200] if stdout else ""
+                    # Get first line of result for display (only if not already set for clipboard error)
+                    if "result_preview" not in locals() or status_msg != "failed" or "Model does not support" not in result_preview:
+                        result_preview = stdout.strip().split('\n')[0][:200] if stdout else ""
                     
-                    await manager.broadcast_fix_progress(
-                        scan_ids[0], 
-                        [i.id for i in file_issues], 
-                        status_msg, 
-                        f"Fix {status_msg} for {file_path}",
-                        model=OPENCODE_MODEL or "default",
-                        duration=duration,
-                        result=result_preview,
-                        cost=estimated_cost,
-                        input_tokens=input_tokens,
-                        output_tokens=output_tokens
-                    )
+                    print(f"[FIX BG] Broadcasting: status={status_msg}, model={OPENCODE_MODEL or 'default'}, duration={duration}")
+                    
+                    try:
+                        await manager.broadcast_fix_progress(
+                            scan_ids[0], 
+                            [i.id for i in file_issues], 
+                            status_msg, 
+                            f"Fix {status_msg} for {file_path}",
+                            model=OPENCODE_MODEL or "unknown",
+                            duration=duration,
+                            result=result_preview,
+                            cost=estimated_cost,
+                            input_tokens=input_tokens,
+                            output_tokens=output_tokens
+                        )
+                    except Exception as broadcast_err:
+                        print(f"[FIX BG] Broadcast error: {broadcast_err}")
                     
             except Exception as e:
                 print(f"[FIX BG] Error: {e}")

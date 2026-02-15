@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Tech Debt Dashboard</title>
-    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/@alpinejs/collapse@3.x.x/dist/cdn.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="/static/css/styles.css">
 </head>
@@ -273,6 +273,11 @@
                         <!-- File Header -->
                         <div @click="expanded = !expanded" class="bg-gray-50 px-4 py-3 border-b border-gray-200 flex items-center justify-between cursor-pointer hover:bg-gray-100 transition-colors">
                             <div class="flex items-center gap-3 min-w-0">
+                                <input type="checkbox" 
+                                       :checked="fileGroup.issues.every(i => selectedIssues.includes(i.id))"
+                                       :indeterminate="fileGroup.issues.some(i => selectedIssues.includes(i.id)) && !fileGroup.issues.every(i => selectedIssues.includes(i.id))"
+                                       @click.stop="fileGroup.issues.forEach(i => selectedIssues.includes(i.id) ? selectedIssues = selectedIssues.filter(id => id !== i.id) : selectedIssues.push(i.id))"
+                                       class="form-checkbox h-4 w-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500">
                                 <svg class="w-5 h-5 text-gray-400 flex-shrink-0 transition-transform" :class="expanded ? 'rotate-90' : ''" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path>
                                 </svg>

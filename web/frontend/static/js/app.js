@@ -541,8 +541,10 @@ document.addEventListener('alpine:init', () => {
             }
             
             // Don't auto-remove - keep results visible until page refresh
-            // Refresh issues to show updated status
-            this.fetchIssues();
+            // Only refresh issues when fix completes (not during streaming updates)
+            if (status === 'completed' || status === 'failed') {
+                this.fetchIssues();
+            }
             
             // Use scanning indicator if there are active fixes
             this.scanning = this.activeScans.length > 0 || this.activeFixes.length > 0;
